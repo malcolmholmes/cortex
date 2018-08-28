@@ -5,14 +5,42 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	jump "github.com/lithammer/go-jump-consistent-hash"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/tsdb/fileutil"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
+
+var (
+	bucketsTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_buckets_total",
+		Help:      "Total count of buckets in the cache.",
+	})
+	bucketsInitialized = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_buckets_initialized_total",
+		Help:      "total number of buckets that have been initialized to cache a chunk",
+	})
+	collisionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_collisions_total",
+		Help:      "total number of collisions when storing a key in the cache",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(bucketsTotal)
+	prometheus.MustRegister(bucketsInitialized)
+	prometheus.MustRegister(collisionsTotal)
+}
 
 // TODO: in the future we could cuckoo hash or linear probe.
 
@@ -35,8 +63,16 @@ func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 type Diskcache struct {
 	mtx     sync.RWMutex
 	f       *os.File
-	buckets uint32
+	buckets int
 	buf     []byte
+	index   []indexEntry
+	hasher  *jump.Hasher
+}
+
+type indexEntry struct {
+	mtx        sync.RWMutex
+	currentKey string
+	timestamp  int64
 }
 
 // NewDiskcache creates a new on-disk cache.
@@ -62,11 +98,15 @@ func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 	}
 
 	buckets := len(buf) / bucketSize
+	bucketsTotal.Set(float64(buckets)) // Report the number of buckets in the diskcache as a metric
+
+	index := make([]indexEntry, buckets)
 
 	return &Diskcache{
-		f:       f,
-		buf:     buf,
-		buckets: uint32(buckets),
+		f:      f,
+		buf:    buf,
+		index:  index,
+		hasher: jump.New(buckets, jump.FNV1),
 	}, nil
 }
 
@@ -93,22 +133,22 @@ func (d *Diskcache) FetchChunkData(ctx context.Context, keys []string) (found []
 }
 
 func (d *Diskcache) fetch(key string) ([]byte, bool) {
-	d.mtx.RLock()
-	defer d.mtx.RUnlock()
+	bucket := d.hasher.Hash(key)
 
-	bucket := hash(key) % d.buckets
-	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
-
-	existingKey, n, ok := get(buf, 0)
-	if !ok || string(existingKey) != key {
+	d.index[bucket].mtx.RLock()
+	defer d.index[bucket].mtx.RUnlock()
+	if d.index[bucket].currentKey != key {
 		return nil, false
 	}
 
-	existingValue, _, ok := get(buf, n)
+	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
+
+	existingValue, _, ok := get(buf, 0)
 	if !ok {
 		return nil, false
 	}
 
+	atomic.StoreInt64(&d.index[bucket].timestamp, time.Now().Unix()) // crude mechanism to not replace cache values that have been active recently
 	result := make([]byte, len(existingValue), len(existingValue))
 	copy(result, existingValue)
 	return result, true
@@ -116,25 +156,42 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 
 // StoreChunk puts a chunk into the cache.
 func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) error {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
+	bucket := d.hasher.Hash(key)
 
-	bucket := hash(key) % d.buckets
+	d.index[bucket].mtx.Lock()
+	defer d.index[bucket].mtx.Unlock()
+
+	if d.index[bucket].currentKey == key { // If chunk is already cached return nil
+		return nil
+	}
+
+	if d.index[bucket].currentKey == "" {
+		bucketsInitialized.Inc()
+	} else {
+		collisionsTotal.Inc()
+		// TODO utilize Cuckoo hashing to improve cache utilization and resolve collisions
+		now := time.Now().Unix() // crude mechanism to not replace cache values that have been active recently
+		if now-d.index[bucket].timestamp < 120 {
+			log.Debugf("cannot evict currently active bucket %v", bucket)
+			return nil
+		}
+		d.index[bucket].timestamp = now
+	}
+
 	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
 
-	n, err := put([]byte(key), buf, 0)
+	_, err := put(value, buf, 0)
 	if err != nil {
+		d.index[bucket].currentKey = ""
 		return err
 	}
 
-	_, err = put(value, buf, n)
-	if err != nil {
-		return err
-	}
-
+	d.index[bucket].currentKey = key
 	return nil
 }
 
+// put places a value in the buffer in the following format
+// | uint64 <length of value> | value |
 func put(value []byte, buf []byte, n int) (int, error) {
 	if len(value)+n+4 > len(buf) {
 		return 0, errors.Wrap(fmt.Errorf("value too big: %d > %d", len(value), len(buf)), "put")
@@ -151,10 +208,4 @@ func get(buf []byte, n int) ([]byte, int, bool) {
 		return nil, 0, false
 	}
 	return buf[n+m : end], end, true
-}
-
-func hash(key string) uint32 {
-	h := fnv.New32()
-	h.Write([]byte(key))
-	return h.Sum32()
 }

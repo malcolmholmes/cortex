@@ -5,16 +5,13 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"sync"
-	"sync/atomic"
-	"time"
 
-	jump "github.com/lithammer/go-jump-consistent-hash"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/tsdb/fileutil"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -61,18 +58,15 @@ func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 
 // Diskcache is an on-disk chunk cache.
 type Diskcache struct {
-	mtx     sync.RWMutex
 	f       *os.File
-	buckets int
+	buckets uint32
 	buf     []byte
 	index   []indexEntry
-	hasher  *jump.Hasher
 }
 
 type indexEntry struct {
 	mtx        sync.RWMutex
 	currentKey string
-	timestamp  int64
 }
 
 // NewDiskcache creates a new on-disk cache.
@@ -103,10 +97,10 @@ func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 	index := make([]indexEntry, buckets)
 
 	return &Diskcache{
-		f:      f,
-		buf:    buf,
-		index:  index,
-		hasher: jump.New(buckets, jump.FNV1),
+		f:       f,
+		buf:     buf,
+		index:   index,
+		buckets: uint32(buckets),
 	}, nil
 }
 
@@ -133,7 +127,7 @@ func (d *Diskcache) FetchChunkData(ctx context.Context, keys []string) (found []
 }
 
 func (d *Diskcache) fetch(key string) ([]byte, bool) {
-	bucket := d.hasher.Hash(key)
+	bucket := hash(key) % d.buckets
 
 	d.index[bucket].mtx.RLock()
 	defer d.index[bucket].mtx.RUnlock()
@@ -148,7 +142,6 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	atomic.StoreInt64(&d.index[bucket].timestamp, time.Now().Unix()) // crude mechanism to not replace cache values that have been active recently
 	result := make([]byte, len(existingValue), len(existingValue))
 	copy(result, existingValue)
 	return result, true
@@ -156,7 +149,7 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 
 // StoreChunk puts a chunk into the cache.
 func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) error {
-	bucket := d.hasher.Hash(key)
+	bucket := hash(key) % d.buckets
 
 	d.index[bucket].mtx.Lock()
 	defer d.index[bucket].mtx.Unlock()
@@ -169,13 +162,6 @@ func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) er
 		bucketsInitialized.Inc()
 	} else {
 		collisionsTotal.Inc()
-		// TODO utilize Cuckoo hashing to improve cache utilization and resolve collisions
-		now := time.Now().Unix() // crude mechanism to not replace cache values that have been active recently
-		if now-d.index[bucket].timestamp < 120 {
-			log.Debugf("cannot evict currently active bucket %v", bucket)
-			return nil
-		}
-		d.index[bucket].timestamp = now
 	}
 
 	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
@@ -208,4 +194,10 @@ func get(buf []byte, n int) ([]byte, int, bool) {
 		return nil, 0, false
 	}
 	return buf[n+m : end], end, true
+}
+
+func hash(key string) uint32 {
+	h := fnv.New32()
+	h.Write([]byte(key))
+	return h.Sum32()
 }

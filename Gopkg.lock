@@ -502,14 +502,6 @@
   revision = "2704adc878c21e1329f46f6e56a1c387d788ff94"
 
 [[projects]]
-  digest = "1:5e03b4345118e93bbabcb878b629fd7895a86da645d6e6dd039b1e3395013e89"
-  name = "github.com/lithammer/go-jump-consistent-hash"
-  packages = ["."]
-  pruneopts = "UT"
-  revision = "33b8bdaea80f7cbd390ea2eaec8581d2da308dc1"
-  version = "v1.0.0"
-
-[[projects]]
   digest = "1:1e718c71e2db9b9561de829dcd22210417c73b5f69c23d888314bcc14c384952"
   name = "github.com/mattes/migrate"
   packages = [
@@ -1355,7 +1347,6 @@
     "github.com/jonboulle/clockwork",
     "github.com/json-iterator/go",
     "github.com/lib/pq",
-    "github.com/lithammer/go-jump-consistent-hash",
     "github.com/mattes/migrate/driver/postgres",
     "github.com/mattes/migrate/migrate",
     "github.com/mgutz/ansi",
@@ -1399,7 +1390,6 @@
     "github.com/prometheus/tsdb",
     "github.com/prometheus/tsdb/fileutil",
     "github.com/segmentio/fasthash/fnv1a",
-    "github.com/sirupsen/logrus",
     "github.com/stretchr/testify/assert",
     "github.com/stretchr/testify/require",
     "github.com/weaveworks/billing-client",

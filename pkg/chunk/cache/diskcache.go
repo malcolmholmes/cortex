@@ -41,8 +41,11 @@ func init() {
 
 // TODO: in the future we could cuckoo hash or linear probe.
 
-// Buckets contain key (~50), chunks (1024) and their metadata (~100)
-const bucketSize = 2048
+// Buckets contain chunks (1024) and their metadata (~100)
+const (
+	bucketSize = 2048 // Buckets contain chunks (1024) and their metadata (~100)
+	numMutexes = 1000 // Total number of mutexes shared by the disk cache index
+)
 
 // DiskcacheConfig for the Disk cache.
 type DiskcacheConfig struct {
@@ -58,15 +61,11 @@ func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 
 // Diskcache is an on-disk chunk cache.
 type Diskcache struct {
-	f       *os.File
-	buckets uint32
-	buf     []byte
-	index   []indexEntry
-}
-
-type indexEntry struct {
-	mtx        sync.RWMutex
-	currentKey string
+	f            *os.File
+	buckets      uint32
+	buf          []byte
+	index        []string
+	indexMutexes []sync.RWMutex
 }
 
 // NewDiskcache creates a new on-disk cache.
@@ -94,13 +93,15 @@ func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 	buckets := len(buf) / bucketSize
 	bucketsTotal.Set(float64(buckets)) // Report the number of buckets in the diskcache as a metric
 
-	index := make([]indexEntry, buckets)
+	index := make([]string, buckets)
+	indexMutexes := make([]sync.RWMutex, numMutexes)
 
 	return &Diskcache{
-		f:       f,
-		buf:     buf,
-		index:   index,
-		buckets: uint32(buckets),
+		f:            f,
+		buckets:      uint32(buckets),
+		buf:          buf,
+		index:        index,
+		indexMutexes: indexMutexes,
 	}, nil
 }
 
@@ -129,9 +130,11 @@ func (d *Diskcache) FetchChunkData(ctx context.Context, keys []string) (found []
 func (d *Diskcache) fetch(key string) ([]byte, bool) {
 	bucket := hash(key) % d.buckets
 
-	d.index[bucket].mtx.RLock()
-	defer d.index[bucket].mtx.RUnlock()
-	if d.index[bucket].currentKey != key {
+	mutex := bucket % numMutexes //Get the index of the mutex associated with this bucket
+	d.indexMutexes[mutex].RLock()
+	defer d.indexMutexes[mutex].RUnlock()
+
+	if d.index[bucket] != key {
 		return nil, false
 	}
 
@@ -151,14 +154,15 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) error {
 	bucket := hash(key) % d.buckets
 
-	d.index[bucket].mtx.Lock()
-	defer d.index[bucket].mtx.Unlock()
+	mutex := bucket % numMutexes //Get the index of the mutex associated with this bucket
+	d.indexMutexes[mutex].Lock()
+	defer d.indexMutexes[mutex].Unlock()
 
-	if d.index[bucket].currentKey == key { // If chunk is already cached return nil
+	if d.index[bucket] == key { // If chunk is already cached return nil
 		return nil
 	}
 
-	if d.index[bucket].currentKey == "" {
+	if d.index[bucket] == "" {
 		bucketsInitialized.Inc()
 	} else {
 		collisionsTotal.Inc()
@@ -168,11 +172,11 @@ func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) er
 
 	_, err := put(value, buf, 0)
 	if err != nil {
-		d.index[bucket].currentKey = ""
+		d.index[bucket] = ""
 		return err
 	}
 
-	d.index[bucket].currentKey = key
+	d.index[bucket] = key
 	return nil
 }
 

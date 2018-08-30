@@ -194,7 +194,7 @@ func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) er
 }
 
 // put places a value in the buffer in the following format
-// | uint64 <length of value> | value |
+// |u int64 <length of key> | key | uint64 <length of value> | value |
 func put(value []byte, buf []byte, n int) (int, error) {
 	if len(value)+n+4 > len(buf) {
 		return 0, errors.Wrap(fmt.Errorf("value too big: %d > %d", len(value), len(buf)), "put")

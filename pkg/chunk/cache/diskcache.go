@@ -23,13 +23,13 @@ var (
 	})
 	bucketsInitialized = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "cortex",
-		Name:      "diskcache_buckets_initialized_total",
-		Help:      "total number of buckets that have been initialized to cache a chunk",
+		Name:      "diskcache_added_new_total",
+		Help:      "total number of entries added to the cache",
 	})
 	collisionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "cortex",
-		Name:      "diskcache_collisions_total",
-		Help:      "total number of collisions when storing a key in the cache",
+		Name:      "diskcache_evicted_total",
+		Help:      "total number entries evicted from the cache",
 	})
 )
 
@@ -43,8 +43,11 @@ func init() {
 
 // Buckets contain chunks (1024) and their metadata (~100)
 const (
-	bucketSize = 2048 // Buckets contain chunks (1024) and their metadata (~100)
-	numMutexes = 1000 // Total number of mutexes shared by the disk cache index
+	// Buckets contain chunks (1024) and their metadata (~100)
+	bucketSize = 2048
+
+	// Total number of mutexes shared by the disk cache index
+	numMutexes = 1000
 )
 
 // DiskcacheConfig for the Disk cache.
@@ -130,7 +133,7 @@ func (d *Diskcache) FetchChunkData(ctx context.Context, keys []string) (found []
 func (d *Diskcache) fetch(key string) ([]byte, bool) {
 	bucket := hash(key) % d.buckets
 
-	mutex := bucket % numMutexes //Get the index of the mutex associated with this bucket
+	mutex := bucket % numMutexes // Get the index of the mutex associated with this bucket
 	d.indexMutexes[mutex].RLock()
 	defer d.indexMutexes[mutex].RUnlock()
 
@@ -140,7 +143,12 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 
 	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
 
-	existingValue, _, ok := get(buf, 0)
+	existingKey, n, ok := get(buf, 0)
+	if !ok || string(existingKey) != key {
+		return nil, false
+	}
+
+	existingValue, _, ok := get(buf, n)
 	if !ok {
 		return nil, false
 	}
@@ -154,7 +162,7 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) error {
 	bucket := hash(key) % d.buckets
 
-	mutex := bucket % numMutexes //Get the index of the mutex associated with this bucket
+	mutex := bucket % numMutexes // Get the index of the mutex associated with this bucket
 	d.indexMutexes[mutex].Lock()
 	defer d.indexMutexes[mutex].Unlock()
 
@@ -170,7 +178,12 @@ func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) er
 
 	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
 
-	_, err := put(value, buf, 0)
+	n, err := put([]byte(key), buf, 0)
+	if err != nil {
+		return err
+	}
+
+	_, err = put(value, buf, n)
 	if err != nil {
 		d.index[bucket] = ""
 		return err

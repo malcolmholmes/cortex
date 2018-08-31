@@ -180,6 +180,7 @@ func (d *Diskcache) StoreChunk(ctx context.Context, key string, value []byte) er
 
 	n, err := put([]byte(key), buf, 0)
 	if err != nil {
+		d.index[bucket] = ""
 		return err
 	}
 

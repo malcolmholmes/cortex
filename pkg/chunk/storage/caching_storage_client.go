@@ -49,6 +49,10 @@ func (s *cachingStorageClient) QueryPages(ctx context.Context, queries []chunk.I
 		}
 	}
 
+	if len(cacheableMissed) == 0 {
+		return nil
+	}
+
 	var resultsMtx sync.Mutex
 	results := map[string][]chunk.ReadBatch{}
 	err := s.StorageClient.QueryPages(ctx, cacheableMissed, func(cacheableQuery chunk.IndexQuery, r chunk.ReadBatch) bool {
@@ -66,6 +70,7 @@ func (s *cachingStorageClient) QueryPages(ctx context.Context, queries []chunk.I
 	defer resultsMtx.Unlock()
 	for key, batches := range results {
 		query := missed[key]
+		s.cache.Put(ctx, key, batches)
 		for _, batch := range batches {
 			callback(query, batch)
 		}

@@ -10,14 +10,53 @@ import (
 	"sync"
 
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/tsdb/fileutil"
 	"golang.org/x/sys/unix"
 )
 
+var (
+	bucketsTotal = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_buckets_total",
+		Help:      "Total count of buckets in the cache.",
+	})
+	bucketsInitialized = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_added_new_total",
+		Help:      "total number of entries added to the cache",
+	})
+	collisionsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "diskcache_evicted_total",
+		Help:      "total number entries evicted from the cache",
+	})
+
+	globalCache *Diskcache
+)
+
 // TODO: in the future we could cuckoo hash or linear probe.
 
-// Buckets contain key (~50), chunks (1024) and their metadata (~100)
-const bucketSize = 2048
+const (
+	// Buckets contain chunks (1024) and their metadata (~100)
+	bucketSize = 2048
+
+	// Total number of mutexes shared by the disk cache index
+	numMutexes = 1000
+)
+
+type diskcacheIndex struct {
+	entries      []string
+	entryMutexes []sync.RWMutex
+}
+
+func newDiskcacheIndex(buckets uint32) *diskcacheIndex {
+	return &diskcacheIndex{
+		entries:      make([]string, buckets),
+		entryMutexes: make([]sync.RWMutex, numMutexes),
+	}
+}
 
 // DiskcacheConfig for the Disk cache.
 type DiskcacheConfig struct {
@@ -33,14 +72,25 @@ func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 
 // Diskcache is an on-disk chunk cache.
 type Diskcache struct {
-	mtx     sync.RWMutex
 	f       *os.File
 	buckets uint32
 	buf     []byte
+	index   *diskcacheIndex
 }
 
 // NewDiskcache creates a new on-disk cache.
 func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
+	if globalCache == nil {
+		var err error
+		globalCache, err = newDiskcache(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return globalCache, nil
+}
+
+func newDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 	f, err := os.OpenFile(cfg.Path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, errors.Wrap(err, "open")
@@ -61,12 +111,14 @@ func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 		return nil, err
 	}
 
-	buckets := len(buf) / bucketSize
+	buckets := uint32(len(buf) / bucketSize)
+	bucketsTotal.Set(float64(buckets)) // Report the number of buckets in the diskcache as a metric
 
 	return &Diskcache{
 		f:       f,
+		buckets: buckets,
 		buf:     buf,
-		buckets: uint32(buckets),
+		index:   newDiskcacheIndex(buckets),
 	}, nil
 }
 
@@ -93,18 +145,16 @@ func (d *Diskcache) Fetch(ctx context.Context, keys []string) (found []string, b
 }
 
 func (d *Diskcache) fetch(key string) ([]byte, bool) {
-	d.mtx.RLock()
-	defer d.mtx.RUnlock()
-
 	bucket := hash(key) % d.buckets
-	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
-
-	existingKey, n, ok := get(buf, 0)
-	if !ok || string(existingKey) != key {
+	shard := bucket % numMutexes // Get the index of the mutex associated with this bucket
+	d.index.entryMutexes[shard].RLock()
+	defer d.index.entryMutexes[shard].RUnlock()
+	if d.index.entries[bucket] != key {
 		return nil, false
 	}
 
-	existingValue, _, ok := get(buf, n)
+	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
+	existingValue, _, ok := get(buf, 0)
 	if !ok {
 		return nil, false
 	}
@@ -116,25 +166,33 @@ func (d *Diskcache) fetch(key string) ([]byte, bool) {
 
 // Store puts a chunk into the cache.
 func (d *Diskcache) Store(ctx context.Context, key string, value []byte) error {
-	d.mtx.Lock()
-	defer d.mtx.Unlock()
-
 	bucket := hash(key) % d.buckets
+	shard := bucket % numMutexes // Get the index of the mutex associated with this bucket
+	d.index.entryMutexes[shard].Lock()
+	defer d.index.entryMutexes[shard].Unlock()
+	if d.index.entries[bucket] == key { // If chunk is already cached return nil
+		return nil
+	}
+
+	if d.index.entries[bucket] == "" {
+		bucketsInitialized.Inc()
+	} else {
+		collisionsTotal.Inc()
+	}
+
 	buf := d.buf[bucket*bucketSize : (bucket+1)*bucketSize]
-
-	n, err := put([]byte(key), buf, 0)
+	_, err := put(value, buf, 0)
 	if err != nil {
+		d.index.entries[bucket] = ""
 		return err
 	}
 
-	_, err = put(value, buf, n)
-	if err != nil {
-		return err
-	}
-
+	d.index.entries[bucket] = key
 	return nil
 }
 
+// put places a value in the buffer in the following format
+// |u int64 <length of key> | key | uint64 <length of value> | value |
 func put(value []byte, buf []byte, n int) (int, error) {
 	if len(value)+n+4 > len(buf) {
 		return 0, errors.Wrap(fmt.Errorf("value too big: %d > %d", len(value), len(buf)), "put")

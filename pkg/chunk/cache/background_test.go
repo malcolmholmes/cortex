@@ -46,7 +46,7 @@ func newMockCache() cache.Cache {
 }
 
 func TestBackground(t *testing.T) {
-	c := cache.NewBackground(cache.BackgroundConfig{
+	c := cache.NewBackground("mock", cache.BackgroundConfig{
 		WriteBackGoroutines: 1,
 		WriteBackBuffer:     100,
 	}, newMockCache())

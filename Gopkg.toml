@@ -6,6 +6,11 @@
   name = "github.com/aws/aws-sdk-go"
   version = "v1.10.8"
 
+[[override]]
+  name = "github.com/weaveworks/common"
+  source = "github.com/gouthamve/common-1"
+  branch = "ot-options"
+
 # Need an override on jaeger-lib as it has a ^0.8.0 contraint on client_golang.
 [[override]]
   name = "github.com/uber/jaeger-lib"

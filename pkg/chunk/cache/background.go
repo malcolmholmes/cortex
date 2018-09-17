@@ -47,6 +47,9 @@ type backgroundCache struct {
 	quit     chan struct{}
 	bgWrites chan backgroundWrite
 	name     string
+
+	droppedWriteBack prometheus.Counter
+	queueLength      prometheus.Gauge
 }
 
 type backgroundWrite struct {
@@ -57,10 +60,12 @@ type backgroundWrite struct {
 // NewBackground returns a new Cache that does stores on background goroutines.
 func NewBackground(name string, cfg BackgroundConfig, cache Cache) Cache {
 	c := &backgroundCache{
-		Cache:    cache,
-		quit:     make(chan struct{}),
-		bgWrites: make(chan backgroundWrite, cfg.WriteBackBuffer),
-		name:     name,
+		Cache:            cache,
+		quit:             make(chan struct{}),
+		bgWrites:         make(chan backgroundWrite, cfg.WriteBackBuffer),
+		name:             name,
+		droppedWriteBack: droppedWriteBack.WithLabelValues(name),
+		queueLength:      queueLength.WithLabelValues(name),
 	}
 
 	c.wg.Add(cfg.WriteBackGoroutines)
@@ -87,9 +92,9 @@ func (c *backgroundCache) Store(ctx context.Context, key string, buf []byte) err
 	}
 	select {
 	case c.bgWrites <- bgWrite:
-		queueLength.WithLabelValues(c.name).Inc()
+		c.queueLength.Inc()
 	default:
-		droppedWriteBack.WithLabelValues(c.name).Inc()
+		c.droppedWriteBack.Inc()
 	}
 	return nil
 }
@@ -103,7 +108,7 @@ func (c *backgroundCache) writeBackLoop() {
 			if !ok {
 				return
 			}
-			queueLength.WithLabelValues(c.name).Dec()
+			c.queueLength.Dec()
 			err := c.Cache.Store(context.Background(), bgWrite.key, bgWrite.buf)
 			if err != nil {
 				level.Error(util.Logger).Log("msg", "error writing to cache", "err", err, "cache", c.name)

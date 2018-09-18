@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,6 +35,7 @@ var (
 	})
 
 	globalCache *Diskcache
+	once        sync.Once
 )
 
 // TODO: in the future we could cuckoo hash or linear probe.
@@ -60,14 +62,16 @@ func newDiskcacheIndex(buckets uint32) *diskcacheIndex {
 
 // DiskcacheConfig for the Disk cache.
 type DiskcacheConfig struct {
-	Path string
-	Size int
+	Path    string
+	Size    int
+	Timeout time.Duration
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
 func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.Path, "diskcache.path", "/var/run/chunks", "Path to file used to cache chunks.")
 	f.IntVar(&cfg.Size, "diskcache.size", 1024*1024*1024, "Size of file (bytes)")
+	f.DurationVar(&cfg.Timeout, "diskcache.timeout", 100*time.Millisecond, "Maximum time to wait before giving up on a diskcache request")
 }
 
 // Diskcache is an on-disk chunk cache.
@@ -76,11 +80,11 @@ type Diskcache struct {
 	buckets uint32
 	buf     []byte
 	index   *diskcacheIndex
+	timeout time.Duration
 }
 
 // NewDiskcache creates a new on-disk cache.
 func NewDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
-	var once sync.Once
 	once.Do(func() {
 		var err error
 		globalCache, err = newDiskcache(cfg)
@@ -120,6 +124,7 @@ func newDiskcache(cfg DiskcacheConfig) (*Diskcache, error) {
 		buckets: buckets,
 		buf:     buf,
 		index:   newDiskcacheIndex(buckets),
+		timeout: cfg.Timeout,
 	}, nil
 }
 
@@ -133,13 +138,20 @@ func (d *Diskcache) Stop() error {
 
 // Fetch get chunks from the cache.
 func (d *Diskcache) Fetch(ctx context.Context, keys []string) (found []string, bufs [][]byte, missed []string, err error) {
+	timeout, cancel := context.WithTimeout(ctx, d.timeout)
+	defer cancel()
 	for _, key := range keys {
-		buf, ok := d.fetch(key)
-		if ok {
-			found = append(found, key)
-			bufs = append(bufs, buf)
-		} else {
+		select {
+		case <-timeout.Done():
 			missed = append(missed, key)
+		default:
+			buf, ok := d.fetch(key)
+			if ok {
+				found = append(found, key)
+				bufs = append(bufs, buf)
+			} else {
+				missed = append(missed, key)
+			}
 		}
 	}
 	return

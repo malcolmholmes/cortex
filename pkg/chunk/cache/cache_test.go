@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
@@ -35,7 +36,7 @@ func fillCache(t *testing.T, cache cache.Cache) ([]string, []chunk.Chunk) {
 			model.Fingerprint(1),
 			model.Metric{
 				model.MetricNameLabel: "foo",
-				"bar": "baz",
+				"bar":                 "baz",
 			},
 			promChunk[0],
 			ts,
@@ -152,8 +153,9 @@ func TestDiskcache(t *testing.T) {
 	defer os.RemoveAll(filename)
 
 	cache, err := cache.NewDiskcache(cache.DiskcacheConfig{
-		Path: filename,
-		Size: 100 * 1024 * 1024,
+		Path:    filename,
+		Size:    100 * 1024 * 1024,
+		Timeout: 1 * time.Second,
 	})
 	require.NoError(t, err)
 	testCache(t, cache)

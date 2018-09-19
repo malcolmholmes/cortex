@@ -71,7 +71,7 @@ type DiskcacheConfig struct {
 func (cfg *DiskcacheConfig) RegisterFlags(f *flag.FlagSet) {
 	f.StringVar(&cfg.Path, "diskcache.path", "/var/run/chunks", "Path to file used to cache chunks.")
 	f.IntVar(&cfg.Size, "diskcache.size", 1024*1024*1024, "Size of file (bytes)")
-	f.DurationVar(&cfg.Timeout, "diskcache.timeout", 100*time.Millisecond, "Maximum time to wait before giving up on a diskcache request")
+	f.DurationVar(&cfg.Timeout, "diskcache.timeout", 500*time.Millisecond, "Maximum time to wait before giving up on a diskcache request")
 }
 
 // Diskcache is an on-disk chunk cache.

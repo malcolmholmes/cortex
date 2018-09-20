@@ -14,6 +14,9 @@ type StorageClient interface {
 	// For storing and retrieving chunks.
 	PutChunks(ctx context.Context, chunks []Chunk) error
 	GetChunks(ctx context.Context, chunks []Chunk) ([]Chunk, error)
+
+	StreamChunks(ctx context.Context, params StreamBatch, chunkChan chan []Chunk) error
+	NewStreamBatch() StreamBatch
 }
 
 // WriteBatch represents a batch of writes.
@@ -31,4 +34,9 @@ type ReadBatchIterator interface {
 	Next() bool
 	RangeValue() []byte
 	Value() []byte
+}
+
+// StreamBatch represents the configuration for streaming chunks
+type StreamBatch interface {
+	Add(tableName, userID string, from, to int)
 }

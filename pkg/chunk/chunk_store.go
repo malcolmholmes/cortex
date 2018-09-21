@@ -5,10 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/promql"
@@ -20,7 +22,7 @@ import (
 )
 
 var (
-	indexEntriesPerChunk = prometheus.NewHistogram(prometheus.HistogramOpts{
+	indexEntriesPerChunk = promauto.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "cortex",
 		Name:      "chunk_store_index_entries_per_chunk",
 		Help:      "Number of entries written to storage per chunk.",
@@ -35,17 +37,25 @@ var (
 		},
 		HashBuckets: 1024,
 	})
-	cacheCorrupt = prometheus.NewCounter(prometheus.CounterOpts{
+	cacheCorrupt = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "cortex",
 		Name:      "cache_corrupt_chunks_total",
 		Help:      "Total count of corrupt chunks found in cache.",
 	})
+	indexWritesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "chunk_store_index_writes_total",
+		Help:      "Total count of index writes to store.",
+	})
+	indexWritesCached = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "chunk_store_index_writes_cached_total",
+		Help:      "Total count of index writes reduced due to caching.",
+	})
 )
 
 func init() {
-	prometheus.MustRegister(indexEntriesPerChunk)
 	prometheus.MustRegister(rowWrites)
-	prometheus.MustRegister(cacheCorrupt)
 }
 
 // StoreConfig specifies config for a ChunkStore
@@ -57,6 +67,8 @@ type StoreConfig struct {
 	CardinalityCacheSize     int
 	CardinalityCacheValidity time.Duration
 	CardinalityLimit         int
+
+	IndexEntryCacheSize int
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
@@ -67,6 +79,8 @@ func (cfg *StoreConfig) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.CardinalityCacheSize, "store.cardinality-cache-size", 0, "Size of in-memory cardinality cache, 0 to disable.")
 	f.DurationVar(&cfg.CardinalityCacheValidity, "store.cardinality-cache-validity", 1*time.Hour, "Period for which entries in the cardinality cache are valid.")
 	f.IntVar(&cfg.CardinalityLimit, "store.cardinality-limit", 1e5, "Cardinality limit for index queries.")
+
+	f.IntVar(&cfg.IndexEntryCacheSize, "store.index-entry-cache", 0, "The number of index entries to cache so we don't write duplicates.")
 }
 
 // store implements Store
@@ -76,6 +90,8 @@ type store struct {
 	storage StorageClient
 	schema  Schema
 	*Fetcher
+
+	entryCache *cache.FifoCache
 }
 
 func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, error) {
@@ -85,10 +101,11 @@ func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, err
 	}
 
 	return &store{
-		cfg:     cfg,
-		storage: storage,
-		schema:  schema,
-		Fetcher: fetcher,
+		cfg:        cfg,
+		storage:    storage,
+		schema:     schema,
+		Fetcher:    fetcher,
+		entryCache: cache.NewFifoCache("entry", cfg.IndexEntryCacheSize, 0),
 	}, nil
 }
 
@@ -149,9 +166,12 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 	}
 	indexEntriesPerChunk.Observe(float64(len(entries)))
 
+	uncachedEntries, cacheKeys := c.dedupeEntriesFromCache(entries)
+	indexWritesTotal.Add(float64(len(uncachedEntries)))
+
 	// Remove duplicate entries based on tableName:hashValue:rangeValue
 	result := c.storage.NewWriteBatch()
-	for _, entry := range entries {
+	for _, entry := range uncachedEntries {
 		key := fmt.Sprintf("%s:%s:%x", entry.TableName, entry.HashValue, entry.RangeValue)
 		if _, ok := seenIndexEntries[key]; !ok {
 			seenIndexEntries[key] = struct{}{}
@@ -159,7 +179,29 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 			result.Add(entry.TableName, entry.HashValue, entry.RangeValue, entry.Value)
 		}
 	}
+	c.entryCache.Store(context.Background(), cacheKeys, make([][]byte, len(cacheKeys)))
+
 	return result, nil
+}
+
+func (c *store) dedupeEntriesFromCache(entries []IndexEntry) ([]IndexEntry, []string) {
+	if c.cfg.IndexEntryCacheSize == 0 {
+		return entries, nil
+	}
+
+	keys, keyMap := keysFromEntries(entries)
+	found, _, missing := c.entryCache.Fetch(context.Background(), keys)
+	if len(found) == 0 {
+		return entries, keys
+	}
+	indexWritesCached.Add(float64(len(found)))
+
+	uncachedEntries := make([]IndexEntry, 0, len(missing))
+	for _, key := range missing {
+		uncachedEntries = append(uncachedEntries, keyMap[key])
+	}
+
+	return uncachedEntries, keys
 }
 
 // Get implements Store
@@ -403,4 +445,24 @@ func (c *store) convertChunkIDsToChunks(ctx context.Context, chunkIDs []string) 
 	}
 
 	return chunkSet, nil
+}
+
+// We return the stringified entry and the map from that string->entry
+// We cannot safely go back from string to entry hence we need the map.
+func keysFromEntries(entries []IndexEntry) ([]string, map[string]IndexEntry) {
+	keys := make([]string, 0, len(entries))
+	keyMap := make(map[string]IndexEntry, len(entries))
+	for _, entry := range entries {
+		key := strings.Join([]string{
+			entry.TableName,
+			entry.HashValue,
+			string(entry.RangeValue),
+			string(entry.Value),
+		}, string('\xff'))
+
+		keys = append(keys, key)
+		keyMap[key] = entry
+	}
+
+	return keys, keyMap
 }

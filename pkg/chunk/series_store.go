@@ -63,10 +63,11 @@ func newSeriesStore(cfg StoreConfig, schema Schema, storage StorageClient) (Stor
 
 	return &seriesStore{
 		store: store{
-			cfg:     cfg,
-			storage: storage,
-			schema:  schema,
-			Fetcher: fetcher,
+			cfg:        cfg,
+			storage:    storage,
+			schema:     schema,
+			Fetcher:    fetcher,
+			entryCache: cache.NewFifoCache("entry", cfg.IndexEntryCacheSize, 0),
 		},
 		cardinalityCache: cache.NewFifoCache("cardinality", cfg.CardinalityCacheSize, cfg.CardinalityCacheValidity),
 	}, nil

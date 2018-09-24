@@ -6,12 +6,21 @@ import (
 	"fmt"
 	"io"
 
-	log "github.com/sirupsen/logrus"
+	"github.com/go-kit/kit/log/level"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/weaveworks/common/user"
 	"github.com/weaveworks/cortex/pkg/chunk"
-	"github.com/weaveworks/cortex/pkg/chunk/testutils"
 	"github.com/weaveworks/cortex/pkg/ingester/client"
+	"github.com/weaveworks/cortex/pkg/util"
 	"github.com/weaveworks/cortex/pkg/util/chunkcompat"
+)
+
+var (
+	sentChunks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cortex_reader_sent_chunks",
+		Help: "The total number of chunks sent by this reader",
+	}, []string{"reader_id"})
 )
 
 type ReaderConfig struct {
@@ -61,14 +70,10 @@ func (r *Reader) TransferData(ctx context.Context) error {
 	out := make(chan []chunk.Chunk)
 
 	go func() {
-		_, chunks, _ := testutils.CreateChunks(0, 100)
-		for _, c := range chunks {
-			out <- []chunk.Chunk{c}
+		err := r.storage.StreamChunks(ctx, batch, out)
+		if err != nil {
+			level.Error(util.Logger).Log("msg", "error streaming chunks", "err", err)
 		}
-		// err := r.storage.StreamChunks(ctx, batch, out)
-		// if err != nil {
-		// 	logrus.Infof("StreamChunks failed, %v", err)
-		// }
 		close(out)
 	}()
 
@@ -93,7 +98,6 @@ func (r Reader) Forward(ctx context.Context, chunkChan chan []chunk.Chunk) error
 		if len(chunks) == 0 {
 			continue
 		}
-		log.Infof("transfering %v chunks with userID %v and fingerprint %v", len(chunks), chunks[0].UserID, chunks[0].Fingerprint)
 		wireChunks, err := chunkcompat.ToChunks(chunks)
 		if err != nil {
 			return err
@@ -110,6 +114,7 @@ func (r Reader) Forward(ctx context.Context, chunkChan chan []chunk.Chunk) error
 		if err != nil {
 			return err
 		}
+		sentChunks.WithLabelValues(r.ID).Add(float64(len(chunks)))
 	}
 	_, err = stream.CloseAndRecv()
 	return err

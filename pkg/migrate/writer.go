@@ -5,17 +5,24 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"time"
 
-	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/sirupsen/logrus"
+	"github.com/go-kit/kit/log/level"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/weaveworks/common/user"
 	"github.com/weaveworks/cortex/pkg/chunk"
 	"github.com/weaveworks/cortex/pkg/ingester/client"
+	"github.com/weaveworks/cortex/pkg/util"
 	"github.com/weaveworks/cortex/pkg/util/chunkcompat"
 	old_ctx "golang.org/x/net/context"
 	"google.golang.org/grpc/health/grpc_health_v1"
+)
+
+var (
+	receivedChunks = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "cortex_reader_sent_chunks",
+		Help: "The total number of chunks sent by this reader",
+	})
 )
 
 type WriterConfig struct{}
@@ -53,32 +60,21 @@ func (w Writer) TransferChunks(stream client.Ingester_TransferChunksServer) erro
 		// round this loop.
 		if fromReaderID == "" {
 			fromReaderID = wireSeries.FromIngesterId
-			logrus.Infof("processing transfer chunks request from reader %v", fromReaderID)
+			level.Info(util.Logger).Log("msg", "processing transfer chunks request from reader", "readerID", fromReaderID)
 		}
 		metric := client.FromLabelPairs(wireSeries.Labels)
 		chunks, err := chunkcompat.FromChunks(wireSeries.UserId, metric, wireSeries.Chunks)
 		if err != nil {
+			level.Error(util.Logger).Log("msg", "unable to decode chunks from stream", "err", err, "readerID", fromReaderID)
 			return err
 		}
 		userCtx := user.InjectOrgID(stream.Context(), wireSeries.UserId)
 		err = w.Store(userCtx, chunks)
 		if err != nil {
-			fmt.Println(err)
+			level.Error(util.Logger).Log("msg", "error storing chunks", "err", err, "readerID", fromReaderID)
+			return err
 		}
-	}
-	m, err := labels.NewMatcher(labels.MatchEqual, "__name__", "foo")
-	if err != nil {
-		return err
-	}
-
-	userCtx := user.InjectOrgID(stream.Context(), "userID")
-	returnedChunks, err := w.chunkStore.Get(userCtx, model.TimeFromUnix(0), model.TimeFromUnix(time.Now().Unix()), m)
-	if err != nil {
-		fmt.Println(err)
-	}
-	for _, c := range returnedChunks {
-		fmt.Println(c.Metric.String())
-		fmt.Println(c.ExternalKey())
+		receivedChunks.WithLabelValues(fromReaderID).Add(float64len(chunks)))
 	}
 	return nil
 }

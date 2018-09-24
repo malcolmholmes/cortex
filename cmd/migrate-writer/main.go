@@ -1,9 +1,7 @@
 package main
 
 import (
-	"context"
 	"flag"
-	"fmt"
 	"os"
 
 	"github.com/go-kit/kit/log/level"
@@ -88,25 +86,6 @@ func main() {
 	if err != nil {
 		level.Error(util.Logger).Log("err", err)
 		os.Exit(1)
-	}
-
-	tableClient, ok := storageOpts[0].Client.(chunk.TableClient)
-	if !ok {
-		level.Error(util.Logger).Log("msg", "error casting storage as table client", "err", err)
-		os.Exit(1)
-	}
-	err = tableClient.CreateTable(context.Background(), chunk.TableDesc{
-		Name:             "cortex",
-		ProvisionedRead:  100000,
-		ProvisionedWrite: 10000,
-	})
-	if err != nil {
-		level.Error(util.Logger).Log("err", err)
-		os.Exit(1)
-	}
-	tables, err := tableClient.ListTables(context.Background())
-	for _, t := range tables {
-		fmt.Println(t)
 	}
 
 	client.RegisterIngesterServer(server.GRPC, writer)

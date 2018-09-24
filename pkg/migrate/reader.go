@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/weaveworks/common/user"
 	"github.com/weaveworks/cortex/pkg/chunk"
 	"github.com/weaveworks/cortex/pkg/chunk/testutils"
@@ -61,8 +61,10 @@ func (r *Reader) TransferData(ctx context.Context) error {
 	out := make(chan []chunk.Chunk)
 
 	go func() {
-		_, chunks, _ := testutils.CreateChunks(0, 1)
-		out <- chunks
+		_, chunks, _ := testutils.CreateChunks(0, 100)
+		for _, c := range chunks {
+			out <- []chunk.Chunk{c}
+		}
 		// err := r.storage.StreamChunks(ctx, batch, out)
 		// if err != nil {
 		// 	logrus.Infof("StreamChunks failed, %v", err)
@@ -91,7 +93,7 @@ func (r Reader) Forward(ctx context.Context, chunkChan chan []chunk.Chunk) error
 		if len(chunks) == 0 {
 			continue
 		}
-		logrus.Infof("transfering %v chunks with userID %v and fingerprint %v", len(chunks), chunks[0].UserID, chunks[0].Fingerprint)
+		log.Infof("transfering %v chunks with userID %v and fingerprint %v", len(chunks), chunks[0].UserID, chunks[0].Fingerprint)
 		wireChunks, err := chunkcompat.ToChunks(chunks)
 		if err != nil {
 			return err
@@ -105,6 +107,9 @@ func (r Reader) Forward(ctx context.Context, chunkChan chan []chunk.Chunk) error
 				Chunks:         wireChunks,
 			},
 		)
+		if err != nil {
+			return err
+		}
 	}
 	_, err = stream.CloseAndRecv()
 	return err

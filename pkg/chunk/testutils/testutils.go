@@ -49,6 +49,7 @@ type createChunkRequest struct {
 	userID string
 }
 
+// User applies a new user ID to chunks created by CreateChunks
 func User(user string) userOpt { return userOpt(user) }
 
 type userOpt string

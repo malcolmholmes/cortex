@@ -67,8 +67,7 @@ type StoreConfig struct {
 	CardinalityCacheSize     int
 	CardinalityCacheValidity time.Duration
 	CardinalityLimit         int
-
-	IndexEntryCacheSize int
+	IndexEntryCacheSize      int
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
@@ -79,8 +78,7 @@ func (cfg *StoreConfig) RegisterFlags(f *flag.FlagSet) {
 	f.IntVar(&cfg.CardinalityCacheSize, "store.cardinality-cache-size", 0, "Size of in-memory cardinality cache, 0 to disable.")
 	f.DurationVar(&cfg.CardinalityCacheValidity, "store.cardinality-cache-validity", 1*time.Hour, "Period for which entries in the cardinality cache are valid.")
 	f.IntVar(&cfg.CardinalityLimit, "store.cardinality-limit", 1e5, "Cardinality limit for index queries.")
-
-	f.IntVar(&cfg.IndexEntryCacheSize, "store.index-entry-cache", 0, "The number of index entries to cache so we don't write duplicates.")
+	f.IntVar(&cfg.IndexEntryCacheSize, "store.index-entry-cache", 0, "Size of index entry cache used to deduplicate writes.")
 }
 
 // store implements Store
@@ -189,7 +187,22 @@ func (c *store) dedupeEntriesFromCache(entries []IndexEntry) ([]IndexEntry, []st
 		return entries, nil
 	}
 
-	keys, keyMap := keysFromEntries(entries)
+	// We return the stringified entry and the map from that string->entry
+	// We cannot safely go back from string to entry hence we need the map.
+	keys := make([]string, 0, len(entries))
+	keyMap := make(map[string]IndexEntry, len(entries))
+	for _, entry := range entries {
+		key := strings.Join([]string{
+			entry.TableName,
+			entry.HashValue,
+			string(entry.RangeValue),
+			string(entry.Value),
+		}, string('\xff'))
+
+		keys = append(keys, key)
+		keyMap[key] = entry
+	}
+
 	found, _, missing := c.entryCache.Fetch(context.Background(), keys)
 	if len(found) == 0 {
 		return entries, keys
@@ -445,24 +458,4 @@ func (c *store) convertChunkIDsToChunks(ctx context.Context, chunkIDs []string) 
 	}
 
 	return chunkSet, nil
-}
-
-// We return the stringified entry and the map from that string->entry
-// We cannot safely go back from string to entry hence we need the map.
-func keysFromEntries(entries []IndexEntry) ([]string, map[string]IndexEntry) {
-	keys := make([]string, 0, len(entries))
-	keyMap := make(map[string]IndexEntry, len(entries))
-	for _, entry := range entries {
-		key := strings.Join([]string{
-			entry.TableName,
-			entry.HashValue,
-			string(entry.RangeValue),
-			string(entry.Value),
-		}, string('\xff'))
-
-		keys = append(keys, key)
-		keyMap[key] = entry
-	}
-
-	return keys, keyMap
 }

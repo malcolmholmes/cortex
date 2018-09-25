@@ -141,35 +141,40 @@ func (c *store) PutOne(ctx context.Context, from, through model.Time, chunk Chun
 
 	c.writeBackCache(ctx, chunks)
 
-	writeReqs, err := c.calculateIndexEntries(userID, from, through, chunks[0])
+	writeReqs, dedupeKeys, err := c.calculateIndexEntries(userID, from, through, chunks[0])
 	if err != nil {
 		return err
 	}
 
-	return c.storage.BatchWrite(ctx, writeReqs)
+	if err := c.storage.BatchWrite(ctx, writeReqs); err != nil {
+		return err
+	}
+
+	c.writeBackDedupeEntrires(dedupeKeys)
+	return nil
 }
 
 // calculateIndexEntries creates a set of batched WriteRequests for all the chunks it is given.
-func (c *store) calculateIndexEntries(userID string, from, through model.Time, chunk Chunk) (WriteBatch, error) {
+func (c *store) calculateIndexEntries(userID string, from, through model.Time, chunk Chunk) (WriteBatch, []string, error) {
 	seenIndexEntries := map[string]struct{}{}
 
 	metricName, err := extract.MetricNameFromMetric(chunk.Metric)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	entries, err := c.schema.GetWriteEntries(from, through, userID, metricName, chunk.Metric, chunk.ExternalKey())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	indexEntriesPerChunk.Observe(float64(len(entries)))
 
-	uncachedEntries, cacheKeys := c.dedupeEntriesFromCache(entries)
-	indexWritesTotal.Add(float64(len(uncachedEntries)))
+	entries, cacheKeys := c.dedupeWriteEntries(entries)
+	indexWritesTotal.Add(float64(len(entries)))
 
 	// Remove duplicate entries based on tableName:hashValue:rangeValue
 	result := c.storage.NewWriteBatch()
-	for _, entry := range uncachedEntries {
+	for _, entry := range entries {
 		key := fmt.Sprintf("%s:%s:%x", entry.TableName, entry.HashValue, entry.RangeValue)
 		if _, ok := seenIndexEntries[key]; !ok {
 			seenIndexEntries[key] = struct{}{}
@@ -177,12 +182,11 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 			result.Add(entry.TableName, entry.HashValue, entry.RangeValue, entry.Value)
 		}
 	}
-	c.entryCache.Store(context.Background(), cacheKeys, make([][]byte, len(cacheKeys)))
 
-	return result, nil
+	return result, cacheKeys, nil
 }
 
-func (c *store) dedupeEntriesFromCache(entries []IndexEntry) ([]IndexEntry, []string) {
+func (c *store) dedupeWriteEntries(entries []IndexEntry) ([]IndexEntry, []string) {
 	if c.cfg.IndexEntryCacheSize == 0 {
 		return entries, nil
 	}
@@ -192,13 +196,7 @@ func (c *store) dedupeEntriesFromCache(entries []IndexEntry) ([]IndexEntry, []st
 	keys := make([]string, 0, len(entries))
 	keyMap := make(map[string]IndexEntry, len(entries))
 	for _, entry := range entries {
-		key := strings.Join([]string{
-			entry.TableName,
-			entry.HashValue,
-			string(entry.RangeValue),
-			string(entry.Value),
-		}, string('\xff'))
-
+		key := dedupeKey(entry)
 		keys = append(keys, key)
 		keyMap[key] = entry
 	}
@@ -214,7 +212,24 @@ func (c *store) dedupeEntriesFromCache(entries []IndexEntry) ([]IndexEntry, []st
 		uncachedEntries = append(uncachedEntries, keyMap[key])
 	}
 
-	return uncachedEntries, keys
+	return uncachedEntries, missing
+}
+
+func (c *store) writeBackDedupeEntrires(keys []string) {
+	if c.cfg.IndexEntryCacheSize == 0 {
+		return
+	}
+	bufs := make([][]byte, len(keys))
+	c.entryCache.Store(context.Background(), keys, bufs)
+}
+
+func dedupeKey(entry IndexEntry) string {
+	return strings.Join([]string{
+		entry.TableName,
+		entry.HashValue,
+		string(entry.RangeValue),
+		string(entry.Value),
+	}, string('\xff'))
 }
 
 // Get implements Store

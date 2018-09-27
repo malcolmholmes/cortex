@@ -1,14 +1,18 @@
 package chunk
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/go-kit/kit/log/level"
+	proto "github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -92,7 +96,7 @@ type store struct {
 	schema  Schema
 	*Fetcher
 
-	entryCache cache.Cache
+	entryCache *indexWriteCache
 }
 
 func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, error) {
@@ -111,7 +115,7 @@ func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, err
 		storage:    storage,
 		schema:     schema,
 		Fetcher:    fetcher,
-		entryCache: entryCache,
+		entryCache: &indexWriteCache{entryCache},
 	}, nil
 }
 
@@ -149,7 +153,7 @@ func (c *store) PutOne(ctx context.Context, from, through model.Time, chunk Chun
 
 	c.writeBackCache(ctx, chunks)
 
-	writeReqs, dedupeKeys, err := c.calculateIndexEntries(userID, from, through, chunks[0])
+	writeReqs, dedupeEntries, err := c.calculateIndexEntries(userID, from, through, chunks[0])
 	if err != nil {
 		return err
 	}
@@ -158,12 +162,12 @@ func (c *store) PutOne(ctx context.Context, from, through model.Time, chunk Chun
 		return err
 	}
 
-	c.writeBackDedupeEntrires(dedupeKeys)
+	c.writeBackDedupeEntrires(dedupeEntries)
 	return nil
 }
 
 // calculateIndexEntries creates a set of batched WriteRequests for all the chunks it is given.
-func (c *store) calculateIndexEntries(userID string, from, through model.Time, chunk Chunk) (WriteBatch, []string, error) {
+func (c *store) calculateIndexEntries(userID string, from, through model.Time, chunk Chunk) (WriteBatch, []IndexEntry, error) {
 	seenIndexEntries := map[string]struct{}{}
 
 	metricName, err := extract.MetricNameFromMetric(chunk.Metric)
@@ -177,7 +181,7 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 	}
 	indexEntriesPerChunk.Observe(float64(len(entries)))
 
-	entries, cacheKeys := c.dedupeWriteEntries(entries)
+	_, entries = c.dedupeWriteEntries(entries)
 	indexWritesTotal.Add(float64(len(entries)))
 
 	// Remove duplicate entries based on tableName:hashValue:rangeValue
@@ -191,54 +195,39 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 		}
 	}
 
-	return result, cacheKeys, nil
+	return result, entries, nil
 }
 
-func (c *store) dedupeWriteEntries(entries []IndexEntry) ([]IndexEntry, []string) {
+func (c *store) dedupeWriteEntries(entries []IndexEntry) (found []IndexEntry, missing []IndexEntry) {
 	if c.entryCache == nil {
 		return entries, nil
 	}
 
-	// We return the stringified entry and the map from that string->entry
-	// We cannot safely go back from string to entry hence we need the map.
-	keys := make([]string, 0, len(entries))
-	keyMap := make(map[string]IndexEntry, len(entries))
-	for _, entry := range entries {
-		key := dedupeKey(entry)
-		keys = append(keys, key)
-		keyMap[key] = entry
-	}
-
-	found, _, missing := c.entryCache.Fetch(context.Background(), keys)
-	if len(found) == 0 {
-		return entries, keys
-	}
-	indexWritesCached.Add(float64(len(found)))
-
-	uncachedEntries := make([]IndexEntry, 0, len(missing))
-	for _, key := range missing {
-		uncachedEntries = append(uncachedEntries, keyMap[key])
-	}
-
-	return uncachedEntries, missing
+	found, missing = c.entryCache.Fetch(context.Background(), entries)
+	return
 }
 
-func (c *store) writeBackDedupeEntrires(keys []string) {
+func (c *store) writeBackDedupeEntrires(entries []IndexEntry) {
 	if c.entryCache == nil {
 		return
 	}
 
-	bufs := make([][]byte, len(keys))
-	c.entryCache.Store(context.Background(), keys, bufs)
+	c.entryCache.Store(context.Background(), entries)
 }
 
 func dedupeKey(entry IndexEntry) string {
-	return strings.Join([]string{
+	key := strings.Join([]string{
 		entry.TableName,
 		entry.HashValue,
 		string(entry.RangeValue),
 		string(entry.Value),
 	}, string('\xff'))
+
+	hasher := fnv.New64a()
+	hasher.Write([]byte(key)) // This'll never error.
+
+	// Hex because memcache errors for the bytes produced by the hash.
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 // Get implements Store
@@ -482,4 +471,87 @@ func (c *store) convertChunkIDsToChunks(ctx context.Context, chunkIDs []string) 
 	}
 
 	return chunkSet, nil
+}
+
+type indexWriteCache struct {
+	cache.Cache
+}
+
+func (c *indexWriteCache) Store(ctx context.Context, entries []IndexEntry) {
+	keys := make([]string, 0, len(entries))
+	bufs := make([][]byte, 0, len(entries))
+
+	for _, entry := range entries {
+		key := dedupeKey(entry)
+		out, err := proto.Marshal(&entry)
+		if err != nil {
+			level.Warn(util.Logger).Log("msg", "error marshalling index entry", "err", err)
+			return
+		}
+
+		keys = append(keys, key)
+		bufs = append(bufs, out)
+	}
+
+	c.Cache.Store(ctx, keys, bufs)
+	return
+}
+
+func (c *indexWriteCache) Fetch(ctx context.Context, entries []IndexEntry) (found []IndexEntry, missing []IndexEntry) {
+	dedupedKeys := make(map[string]IndexEntry, len(entries))
+	for _, entry := range entries {
+		dedupedKeys[dedupeKey(entry)] = entry
+	}
+
+	keys := make([]string, 0, len(dedupedKeys))
+	for key := range dedupedKeys {
+		keys = append(keys, key)
+	}
+
+	foundKeys, bufs, _ := c.Cache.Fetch(ctx, keys)
+	found = make([]IndexEntry, 0, len(foundKeys))
+
+	for i, key := range foundKeys {
+		entry := dedupedKeys[key]
+		buf := bufs[i]
+		out, err := proto.Marshal(&entry)
+		if err != nil {
+			level.Warn(util.Logger).Log("msg", "error marshalling index entry", "err", err)
+			return nil, entries
+		}
+
+		if bytes.Equal(buf, out) {
+			found = append(found, entry)
+		}
+	}
+
+	// Calculate what is missing.
+	missing = make([]IndexEntry, 0, len(entries)-len(found))
+	i := 0
+	for _, entry := range entries {
+		if i >= len(found) {
+			missing = append(missing, entry)
+			continue
+		}
+
+		if !entryEquals(entry, found[i]) {
+			missing = append(missing, entry)
+			continue
+		}
+
+		i++
+	}
+
+	return
+}
+
+func (c *indexWriteCache) Stop() error {
+	return c.Cache.Stop()
+}
+
+func entryEquals(a, b IndexEntry) bool {
+	return a.TableName == b.TableName &&
+		a.HashValue == b.HashValue &&
+		bytes.Equal(a.RangeValue, b.RangeValue) &&
+		bytes.Equal(a.Value, b.Value)
 }

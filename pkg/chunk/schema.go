@@ -55,18 +55,6 @@ type IndexQuery struct {
 	ValueEqual []byte
 }
 
-// IndexEntry describes an entry in the chunk index
-type IndexEntry struct {
-	TableName string
-	HashValue string
-
-	// For writes, RangeValue will always be set.
-	RangeValue []byte
-
-	// New for v6 schema, label value is not written as part of the range key.
-	Value []byte
-}
-
 // v1Schema was:
 // - hash key: <userid>:<hour bucket>:<metric name>
 // - range key: <label name>\0<label value>\0<chunk name>

@@ -542,7 +542,7 @@ func TestIndexCachingWorks(t *testing.T) {
 	storage := store.(*seriesStore).storage.(*MockStorage)
 
 	fooChunk1 := dummyChunkFor(now, metric)
-	fooChunk2 := dummyChunkFor(now.Add(1*time.Hour), metric)
+	fooChunk2 := dummyChunkFor(now.Add(1*time.Millisecond), metric)
 
 	err := store.Put(ctx, []Chunk{fooChunk1})
 	require.NoError(t, err)

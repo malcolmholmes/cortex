@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package chunk;
+
+// IndexEntry describes an entry in the chunk index
+message IndexEntry {
+    string TableName = 1;
+    string HashValue = 2;
+
+    bytes RangeValue = 3;
+    bytes Value = 4;
+}

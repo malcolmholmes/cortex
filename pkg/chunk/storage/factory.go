@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/go-kit/kit/log/level"
 	"github.com/pkg/errors"
@@ -24,9 +23,7 @@ type Config struct {
 	GCPStorageConfig       gcp.Config
 	CassandraStorageConfig cassandra.Config
 
-	IndexCacheSize     int
-	IndexCacheValidity time.Duration
-	memcacheClient     cache.MemcachedClientConfig
+	indexCache cache.Config
 }
 
 // RegisterFlags adds the flags required to configure this flag set.
@@ -36,28 +33,14 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	cfg.GCPStorageConfig.RegisterFlags(f)
 	cfg.CassandraStorageConfig.RegisterFlags(f)
 
-	f.IntVar(&cfg.IndexCacheSize, "store.index-cache-size", 0, "Size of in-memory index cache, 0 to disable.")
-	f.DurationVar(&cfg.IndexCacheValidity, "store.index-cache-validity", 5*time.Minute, "Period for which entries in the index cache are valid. Should be no higher than -ingester.max-chunk-idle.")
-	cfg.memcacheClient.RegisterFlagsWithPrefix("index", f)
+	cfg.indexCache.RegisterFlagsWithPrefix("store.index-cache", f)
 }
 
 // Opts makes the storage clients based on the configuration.
 func Opts(cfg Config, schemaCfg chunk.SchemaConfig) ([]chunk.StorageOpt, error) {
-	var caches []cache.Cache
-	if cfg.IndexCacheSize > 0 {
-		fifocache := cache.Instrument("fifo-index", cache.NewFifoCache("index", cache.FifoCacheConfig{cfg.IndexCacheSize, cfg.IndexCacheValidity}))
-		caches = append(caches, fifocache)
-	}
-
-	if cfg.memcacheClient.Host != "" {
-		client := cache.NewMemcachedClient(cfg.memcacheClient)
-		memcache := cache.Instrument("memcache-index", cache.NewMemcached(cache.MemcachedConfig{
-			Expiration: cfg.IndexCacheValidity,
-		}, client))
-		caches = append(caches, cache.NewBackground(cache.BackgroundConfig{
-			WriteBackGoroutines: 10,
-			WriteBackBuffer:     100,
-		}, memcache))
+	tieredCache, err := cache.New(cfg.indexCache)
+	if err != nil {
+		return nil, errors.Wrap(err, "create index cache")
 	}
 
 	opts, err := newStorageOpts(cfg, schemaCfg)
@@ -65,11 +48,8 @@ func Opts(cfg Config, schemaCfg chunk.SchemaConfig) ([]chunk.StorageOpt, error) 
 		return nil, errors.Wrap(err, "error creating storage client")
 	}
 
-	if len(caches) > 0 {
-		tieredCache := cache.Instrument("tiered-index", cache.NewTiered(caches))
-		for i := range opts {
-			opts[i].Client = newCachingStorageClient(opts[i].Client, tieredCache, cfg.IndexCacheValidity)
-		}
+	for i := range opts {
+		opts[i].Client = newCachingStorageClient(opts[i].Client, tieredCache, cfg.indexCache.DefaultValidity)
 	}
 
 	return opts, nil

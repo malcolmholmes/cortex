@@ -17,6 +17,7 @@ import (
 
 	"github.com/weaveworks/common/test"
 	"github.com/weaveworks/common/user"
+	"github.com/weaveworks/cortex/pkg/chunk/cache"
 	"github.com/weaveworks/cortex/pkg/prom1/storage/local/chunk"
 	"github.com/weaveworks/cortex/pkg/util"
 	"github.com/weaveworks/cortex/pkg/util/extract"
@@ -65,7 +66,10 @@ var stores = []struct {
 			)
 			util.DefaultValues(&storeCfg, &schemaCfg)
 
-			storeCfg.IndexEntryCacheSize = 500
+			storeCfg.EntryCache.Cache = cache.NewFifoCache("test", cache.FifoCacheConfig{
+				Size: 500,
+			})
+
 			return storeCfg, schemaCfg
 		},
 	},

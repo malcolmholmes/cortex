@@ -2,10 +2,10 @@ package chunk
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/go-kit/kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
@@ -58,7 +58,12 @@ type seriesStore struct {
 func newSeriesStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, error) {
 	fetcher, err := NewChunkFetcher(cfg.CacheConfig, storage)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "create chunk fetcher")
+	}
+
+	entryCache, err := cache.New(cfg.EntryCache)
+	if err != nil {
+		return nil, errors.Wrap(err, "make entry cache")
 	}
 
 	return &seriesStore{
@@ -67,7 +72,7 @@ func newSeriesStore(cfg StoreConfig, schema Schema, storage StorageClient) (Stor
 			storage:    storage,
 			schema:     schema,
 			Fetcher:    fetcher,
-			entryCache: cache.NewFifoCache("entry", cache.FifoCacheConfig{cfg.IndexEntryCacheSize, 0}),
+			entryCache: entryCache,
 		},
 		cardinalityCache: cache.NewFifoCache("cardinality", cache.FifoCacheConfig{cfg.CardinalityCacheSize, cfg.CardinalityCacheValidity}),
 	}, nil

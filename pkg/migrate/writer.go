@@ -20,8 +20,8 @@ import (
 
 var (
 	receivedChunks = promauto.NewCounterVec(prometheus.CounterOpts{
-		Name: "cortex_reader_sent_chunks",
-		Help: "The total number of chunks sent by this reader",
+		Name: "cortex_reader_received_chunks",
+		Help: "The total number of chunks received by this writer",
 	}, []string{"reader_id"})
 )
 

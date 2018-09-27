@@ -22,7 +22,7 @@ var (
 	receivedChunks = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "cortex_reader_sent_chunks",
 		Help: "The total number of chunks sent by this reader",
-	})
+	}, []string{"reader_id"})
 )
 
 type WriterConfig struct{}
@@ -74,7 +74,7 @@ func (w Writer) TransferChunks(stream client.Ingester_TransferChunksServer) erro
 			level.Error(util.Logger).Log("msg", "error storing chunks", "err", err, "readerID", fromReaderID)
 			return err
 		}
-		receivedChunks.WithLabelValues(fromReaderID).Add(float64len(chunks)))
+		receivedChunks.WithLabelValues(fromReaderID).Add(float64(len(chunks)))
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-kit/kit/log/level"
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/common/model"
@@ -67,18 +68,20 @@ type StoreConfig struct {
 	CardinalityCacheSize     int
 	CardinalityCacheValidity time.Duration
 	CardinalityLimit         int
-	IndexEntryCacheSize      int
+
+	EntryCache cache.Config
 }
 
 // RegisterFlags adds the flags required to config this to the given FlagSet
 func (cfg *StoreConfig) RegisterFlags(f *flag.FlagSet) {
 	cfg.CacheConfig.RegisterFlags(f)
+	cfg.EntryCache.RegisterFlagsWithPrefix("index-write-entry", f)
+
 	f.DurationVar(&cfg.MinChunkAge, "store.min-chunk-age", 0, "Minimum time between chunk update and being saved to the store.")
 	f.IntVar(&cfg.QueryChunkLimit, "store.query-chunk-limit", 2e6, "Maximum number of chunks that can be fetched in a single query.")
 	f.IntVar(&cfg.CardinalityCacheSize, "store.cardinality-cache-size", 0, "Size of in-memory cardinality cache, 0 to disable.")
 	f.DurationVar(&cfg.CardinalityCacheValidity, "store.cardinality-cache-validity", 1*time.Hour, "Period for which entries in the cardinality cache are valid.")
 	f.IntVar(&cfg.CardinalityLimit, "store.cardinality-limit", 1e5, "Cardinality limit for index queries.")
-	f.IntVar(&cfg.IndexEntryCacheSize, "store.index-entry-cache", 0, "Size of index entry cache used to deduplicate writes.")
 }
 
 // store implements Store
@@ -89,13 +92,18 @@ type store struct {
 	schema  Schema
 	*Fetcher
 
-	entryCache *cache.FifoCache
+	entryCache cache.Cache
 }
 
 func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, error) {
 	fetcher, err := NewChunkFetcher(cfg.CacheConfig, storage)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "create chunk fetcher")
+	}
+
+	entryCache, err := cache.New(cfg.EntryCache)
+	if err != nil {
+		return nil, errors.Wrap(err, "make entry cache")
 	}
 
 	return &store{
@@ -103,7 +111,7 @@ func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, err
 		storage:    storage,
 		schema:     schema,
 		Fetcher:    fetcher,
-		entryCache: cache.NewFifoCache("entry", cache.FifoCacheConfig{cfg.IndexEntryCacheSize, 0}),
+		entryCache: entryCache,
 	}, nil
 }
 
@@ -187,7 +195,7 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 }
 
 func (c *store) dedupeWriteEntries(entries []IndexEntry) ([]IndexEntry, []string) {
-	if c.cfg.IndexEntryCacheSize == 0 {
+	if c.entryCache == nil {
 		return entries, nil
 	}
 
@@ -216,9 +224,10 @@ func (c *store) dedupeWriteEntries(entries []IndexEntry) ([]IndexEntry, []string
 }
 
 func (c *store) writeBackDedupeEntrires(keys []string) {
-	if c.cfg.IndexEntryCacheSize == 0 {
+	if c.entryCache == nil {
 		return
 	}
+
 	bufs := make([][]byte, len(keys))
 	c.entryCache.Store(context.Background(), keys, bufs)
 }

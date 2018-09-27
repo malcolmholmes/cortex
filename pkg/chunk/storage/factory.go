@@ -45,7 +45,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 func Opts(cfg Config, schemaCfg chunk.SchemaConfig) ([]chunk.StorageOpt, error) {
 	var caches []cache.Cache
 	if cfg.IndexCacheSize > 0 {
-		fifocache := cache.Instrument("fifo-index", cache.NewFifoCache("index", cfg.IndexCacheSize, cfg.IndexCacheValidity))
+		fifocache := cache.Instrument("fifo-index", cache.NewFifoCache("index", cache.FifoCacheConfig{cfg.IndexCacheSize, cfg.IndexCacheValidity}))
 		caches = append(caches, fifocache)
 	}
 

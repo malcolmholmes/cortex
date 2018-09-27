@@ -103,7 +103,7 @@ func newStore(cfg StoreConfig, schema Schema, storage StorageClient) (Store, err
 		storage:    storage,
 		schema:     schema,
 		Fetcher:    fetcher,
-		entryCache: cache.NewFifoCache("entry", cfg.IndexEntryCacheSize, 0),
+		entryCache: cache.NewFifoCache("entry", cache.FifoCacheConfig{cfg.IndexEntryCacheSize, 0}),
 	}, nil
 }
 

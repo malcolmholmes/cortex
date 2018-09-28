@@ -57,6 +57,22 @@ var (
 		Name:      "chunk_store_index_writes_cached_total",
 		Help:      "Total count of index writes reduced due to caching.",
 	})
+
+	indexEntriesCached = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "chunk_store_cache_entries_put_total",
+		Help:      "Total count of index entries written to cache.",
+	})
+	indexEntriesRequested = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "chunk_store_cache_entries_requested_total",
+		Help:      "Total count of index entries requested from cache.",
+	})
+	indexEntriesHit = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "cortex",
+		Name:      "chunk_store_cache_entries_hit_total",
+		Help:      "Total count of index entries which resulted in cache hits.",
+	})
 )
 
 func init() {
@@ -79,7 +95,7 @@ type StoreConfig struct {
 // RegisterFlags adds the flags required to config this to the given FlagSet
 func (cfg *StoreConfig) RegisterFlags(f *flag.FlagSet) {
 	cfg.CacheConfig.RegisterFlags(f)
-	cfg.EntryCache.RegisterFlagsWithPrefix("index-write-entry", f)
+	cfg.EntryCache.RegisterFlagsWithPrefix("store.index-cache-write", f)
 
 	f.DurationVar(&cfg.MinChunkAge, "store.min-chunk-age", 0, "Minimum time between chunk update and being saved to the store.")
 	f.IntVar(&cfg.QueryChunkLimit, "store.query-chunk-limit", 2e6, "Maximum number of chunks that can be fetched in a single query.")
@@ -181,8 +197,9 @@ func (c *store) calculateIndexEntries(userID string, from, through model.Time, c
 	}
 	indexEntriesPerChunk.Observe(float64(len(entries)))
 
-	_, entries = c.dedupeWriteEntries(entries)
+	found, entries := c.dedupeWriteEntries(entries)
 	indexWritesTotal.Add(float64(len(entries)))
+	indexWritesCached.Add(float64(len(found)))
 
 	// Remove duplicate entries based on tableName:hashValue:rangeValue
 	result := c.storage.NewWriteBatch()
@@ -478,6 +495,8 @@ type indexWriteCache struct {
 }
 
 func (c *indexWriteCache) Store(ctx context.Context, entries []IndexEntry) {
+	indexEntriesCached.Add(float64(len(entries)))
+
 	keys := make([]string, 0, len(entries))
 	bufs := make([][]byte, 0, len(entries))
 
@@ -498,6 +517,8 @@ func (c *indexWriteCache) Store(ctx context.Context, entries []IndexEntry) {
 }
 
 func (c *indexWriteCache) Fetch(ctx context.Context, entries []IndexEntry) (found []IndexEntry, missing []IndexEntry) {
+	indexEntriesRequested.Add(float64(len(entries)))
+
 	dedupedKeys := make(map[string]IndexEntry, len(entries))
 	for _, entry := range entries {
 		dedupedKeys[dedupeKey(entry)] = entry
@@ -542,6 +563,7 @@ func (c *indexWriteCache) Fetch(ctx context.Context, entries []IndexEntry) (foun
 		i++
 	}
 
+	indexEntriesHit.Add(float64(len(found)))
 	return
 }
 

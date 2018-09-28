@@ -33,7 +33,7 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	cfg.GCPStorageConfig.RegisterFlags(f)
 	cfg.CassandraStorageConfig.RegisterFlags(f)
 
-	cfg.indexCache.RegisterFlagsWithPrefix("store.index-cache", f)
+	cfg.indexCache.RegisterFlagsWithPrefix("store.index-cache-read", f)
 }
 
 // Opts makes the storage clients based on the configuration.

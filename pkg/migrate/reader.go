@@ -69,6 +69,9 @@ func (r *Reader) TransferData(ctx context.Context) error {
 
 	out := make(chan []chunk.Chunk)
 
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	go func() {
 		err := r.storage.StreamChunks(ctx, batch, out)
 		if err != nil {
@@ -76,7 +79,6 @@ func (r *Reader) TransferData(ctx context.Context) error {
 		}
 		close(out)
 	}()
-
 	return r.Forward(ctx, out)
 }
 

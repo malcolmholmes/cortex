@@ -567,7 +567,12 @@ func (s *storageClientColumnKey) StreamChunks(ctx context.Context, params chunk.
 				return false
 			}
 			if c.Fingerprint.String() != curKey {
-				out <- chunks
+				select {
+				case <-ctx.Done():
+					processingErr = fmt.Errorf("stream canceled, current query %v_%v, with user %v", query.table, query.identifier, query.userID)
+					return false
+				case out <- chunks:
+				}
 				curKey = c.Fingerprint.String()
 				chunks = []chunk.Chunk{}
 			}

@@ -368,13 +368,19 @@ func (s *storageClient) StreamChunks(ctx context.Context, params chunk.StreamBat
 		}
 		err := iter.Close()
 		if err != nil {
-			return err
+			return fmt.Errorf("stream failed, %v, current query %v_%v_%v, with user %v", err, query.tableName, query.tokenFrom, query.tokenTo, query.userID)
 		}
-		out <- chunks
 		for _, err := range errs {
 			if err != nil {
-				return err
+				return fmt.Errorf("stream failed, %v, current query %v_%v_%v, with user %v", err, query.tableName, query.tokenFrom, query.tokenTo, query.userID)
 			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("stream canceled, current query %v_%v_%v, with user %v", query.tableName, query.tokenFrom, query.tokenTo, query.userID)
+		case out <- chunks:
+			continue
 		}
 	}
 	return nil

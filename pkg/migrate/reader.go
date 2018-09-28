@@ -73,13 +73,15 @@ func (r *Reader) TransferData(ctx context.Context) error {
 	defer cancel()
 
 	go func() {
-		err := r.storage.StreamChunks(ctx, batch, out)
+		err := r.storage.StreamChunks(readCtx, batch, out)
 		if err != nil {
 			level.Error(util.Logger).Log("msg", "error streaming chunks", "err", err)
 		}
 		close(out)
 	}()
-	return r.Forward(ctx, out)
+	err := r.Forward(readCtx, out)
+
+	return err
 }
 
 // Forward reads batched chunks with the same metric from a channel and wires them

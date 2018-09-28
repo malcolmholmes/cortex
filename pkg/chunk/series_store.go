@@ -15,6 +15,7 @@ import (
 	"github.com/weaveworks/cortex/pkg/chunk/cache"
 	"github.com/weaveworks/cortex/pkg/util"
 	"github.com/weaveworks/cortex/pkg/util/extract"
+	"github.com/weaveworks/cortex/pkg/util/spanlogger"
 )
 
 var (
@@ -74,7 +75,7 @@ func newSeriesStore(cfg StoreConfig, schema Schema, storage StorageClient) (Stor
 
 // Get implements Store
 func (c *seriesStore) Get(ctx context.Context, from, through model.Time, allMatchers ...*labels.Matcher) ([]Chunk, error) {
-	log, ctx := newSpanLogger(ctx, "ChunkStore.Get")
+	log, ctx := spanlogger.New(ctx, "ChunkStore.Get")
 	defer log.Span.Finish()
 	level.Debug(log).Log("from", from, "through", through, "matchers", len(allMatchers))
 
@@ -138,7 +139,7 @@ func (c *seriesStore) Get(ctx context.Context, from, through model.Time, allMatc
 }
 
 func (c *seriesStore) lookupSeriesByMetricNameMatchers(ctx context.Context, from, through model.Time, metricName string, matchers []*labels.Matcher) ([]string, error) {
-	log, ctx := newSpanLogger(ctx, "ChunkStore.lookupSeriesByMetricNameMatchers", "metricName", metricName, "matchers", len(matchers))
+	log, ctx := spanlogger.New(ctx, "ChunkStore.lookupSeriesByMetricNameMatchers", "metricName", metricName, "matchers", len(matchers))
 	defer log.Span.Finish()
 
 	// Just get series for metric if there are no matchers
@@ -202,7 +203,7 @@ func (c *seriesStore) lookupSeriesByMetricNameMatchers(ctx context.Context, from
 }
 
 func (c *seriesStore) lookupSeriesByMetricNameMatcher(ctx context.Context, from, through model.Time, metricName string, matcher *labels.Matcher) ([]string, error) {
-	log, ctx := newSpanLogger(ctx, "ChunkStore.lookupSeriesByMetricNameMatcher", "metricName", metricName, "matcher", matcher)
+	log, ctx := spanlogger.New(ctx, "ChunkStore.lookupSeriesByMetricNameMatcher", "metricName", metricName, "matcher", matcher)
 	defer log.Span.Finish()
 
 	userID, err := user.ExtractOrgID(ctx)
@@ -263,7 +264,7 @@ func (c *seriesStore) lookupSeriesByMetricNameMatcher(ctx context.Context, from,
 }
 
 func (c *seriesStore) lookupChunksBySeries(ctx context.Context, from, through model.Time, seriesIDs []string) ([]string, error) {
-	log, ctx := newSpanLogger(ctx, "ChunkStore.lookupChunksBySeries")
+	log, ctx := spanlogger.New(ctx, "ChunkStore.lookupChunksBySeries")
 	defer log.Span.Finish()
 
 	userID, err := user.ExtractOrgID(ctx)
